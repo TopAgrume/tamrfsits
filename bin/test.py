@@ -707,7 +707,7 @@ def main():
         "--profile", action="store_true", help="Print processing time information"
     )
     parser.add_argument(
-        "--margin", default=30, help="Margin for evaluation and rendering"
+        "--margin", default=30, type=int, help="Margin for evaluation and rendering"
     )
     parser.add_argument(
         "--disable_metrics", action="store_true", help="Disable metrics computation"
