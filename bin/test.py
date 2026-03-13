@@ -253,6 +253,12 @@ def get_strategy(args) -> ValidationParameters:
             context_start=args.context_start,
             nb_context_images=args.context_nb_dates,
             custom_dates=args.custom_target_dates,
+
+            # custom forecast
+            custom_forecast_context_size=args.custom_forecast_context_size,
+            custom_forecast_gap_step=args.custom_forecast_gap_step,
+            custom_forecast_only_hr=args.custom_forecast_only_hr,
+            dt_orig=args.dt_orig
         )
     if algorithm in (Algorithm.SEN2LIKE, Algorithm.DSTFN):
         return ValidationParameters(strategy=ValidationStrategy.CONJLRuHR2HR)
@@ -834,6 +840,20 @@ def main():
 
     parser.add_argument(
         "--dt_orig", required=False, type=str, help="Origin of doy count"
+    )
+
+    # custom forecast
+    parser.add_argument(
+        "--custom_forecast_context_size", type=int, default=5,
+        help="Number of context images to use before the forecast threshold"
+    )
+    parser.add_argument(
+        "--custom_forecast_gap_step", type=int, default=1,
+        help="Gap step between context images (1 = take all, 2 = take 1 out of 2, etc.)"
+    )
+    parser.add_argument(
+        "--custom_forecast_only_hr", action="store_true",
+        help="If set, strictly use HR (Sentinel-2) images and ignore LR images"
     )
 
     args = parser.parse_args()
