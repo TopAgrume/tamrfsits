@@ -77,7 +77,7 @@ A ~Makefile~ is provided to ease the use of code quality control tools. Among th
 A few environment variables are required to run some of the tests:
 
 - ~LS2S2_DATASET_PATH~ : Path to the LS2S2 dataset
-- ~TESTS_OUPTUT_PATH~ : A temporary folder where tests can spill data
+- ~TESTS_OUTPUT_PATH~ : A temporary folder where tests can spill data
 
 
 * Usage
