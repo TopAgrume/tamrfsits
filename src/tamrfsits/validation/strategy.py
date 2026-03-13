@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
+import logging
+from datetime import timedelta
+from pandas import to_datetime
+from datetime import date, timedelta
+
 import torch
 from torch import logical_and as torch_logical_and  # pylint: disable=no-name-in-module
 
@@ -44,6 +49,8 @@ class ValidationStrategy(Enum):
     L3A_10D = "L3A_10D"
     CONTEXT = "CONTEXT"
     CUSTOM = "CUSTOM"
+    # custom forecast
+    CUSTOM_FORECAST = "CUSTOM_FORECAST"
 
 
 DEFAULT_MAE_STRATEGIES = (
@@ -93,6 +100,11 @@ class ValidationParameters:
     nb_context_images: int = 1
     custom_dates: list[int] | None = None
 
+    # custom forecast
+    custom_forecast_context_size: int = 5  # nombre d'images à garder
+    custom_forecast_gap_step: int = 1      # 1 = toutes les images, 2 = 1 sur 2, etc.
+    custom_forecast_only_hr: bool = True   # True pour n'utiliser que Sentinel-2 -> HR
+    dt_orig: str = "2021-01-01"
 
 @dataclass
 class TestingConfiguration:
@@ -554,6 +566,81 @@ def generate_configurations(
             subset_doy_monomodal_sits(lr_sits, target_doy),
             subset_doy_monomodal_sits(hr_sits, target_doy),
         )
+    elif parameters.strategy is ValidationStrategy.CUSTOM_FORECAST:
+        # recherche des dates supérieures ou égales au seuil
+        future_hr_indices = [
+            i for i in range(hr_sits.doy.shape[1])
+            if hr_sits.doy[0, i] >= parameters.forecast_doy_start
+        ]
 
+        if not future_hr_indices:
+            raise ValueError(f"Aucune date cible trouvée après le seuil {parameters.forecast_doy_start}")
+
+        # uniquement la première date après le threshold
+        target_hr_idx = future_hr_indices[0]
+        target_hr_doy = hr_sits.doy[0, target_hr_idx].item()
+
+        # Conversion au format calendrier YYYY-MM-DD
+        dt_origin = to_datetime(parameters.dt_orig)
+        target_calendar_date = (dt_origin + timedelta(days=target_hr_doy)).strftime("%Y-%m-%d")
+
+        # identification de toutes les dates HR avant le seuil de prédiction
+        past_hr_indices = [
+            i for i in range(hr_sits.doy.shape[1])
+            if hr_sits.doy[0, i] < parameters.forecast_doy_start
+        ]
+        # index 0 -> la date la plus proche du seuil
+        past_hr_indices.reverse()
+
+        selected_hr_indices = []
+        # selection avec gaps temporels
+        for idx in range(0, len(past_hr_indices), parameters.custom_forecast_gap_step):
+            selected_hr_indices.append(past_hr_indices[idx])
+            if len(selected_hr_indices) == parameters.custom_forecast_context_size:
+                break
+
+        # remise dans l'ordre chronologique
+        selected_hr_indices.reverse()
+
+        # récupération et conversion des DOYs du contexte pour le log
+        context_doys = [hr_sits.doy[0, i].item() for i in selected_hr_indices]
+        context_calendar_dates = [
+            (dt_origin + timedelta(days=d)).strftime("%Y-%m-%d") for d in context_doys
+        ]
+
+        logging.info(f">> Contexte (DOY): {context_doys}")
+        logging.info(f">> Contexte (calendrier): {context_calendar_dates}")
+        logging.info(f">> Cible à prédire (DOY): {target_hr_doy}")
+        logging.info(f">> Cible à prédire (calendrier): {target_calendar_date}")
+
+        # on empêche landsat
+        clear_lr_dates = []
+
+        if not parameters.custom_forecast_only_hr:
+            # dates LR passées
+            past_lr_indices = [
+                i for i in range(lr_sits.doy.shape[1])
+                if lr_sits.doy[0, i] < parameters.forecast_doy_start
+            ]
+            past_lr_indices.reverse()
+
+            # mêmes contraintes de contexte que HR
+            for idx in range(0, len(past_lr_indices), parameters.custom_forecast_gap_step):
+                clear_lr_dates.append(past_lr_indices[idx])
+                if len(clear_lr_dates) == parameters.custom_forecast_context_size:
+                    break
+            clear_lr_dates.reverse()
+
+            lr_context_doys = [lr_sits.doy[0, i].item() for i in clear_lr_dates]
+            logging.info(f">> Contexte LR (DOY): {lr_context_doys}")
+
+        target_indices = selected_hr_indices + [target_hr_idx]
+
+        yield TestingConfiguration(
+            mask_sits_by_doy(lr_sits, clear_lr_dates),
+            mask_sits_by_doy(hr_sits, selected_hr_indices),
+            None, # pas de cible LR
+            mask_sits_by_doy(hr_sits, target_indices)
+        )
     else:
         raise ValueError(parameters.strategy)
