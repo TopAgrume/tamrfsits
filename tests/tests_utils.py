@@ -24,7 +24,7 @@ def get_ls2s2_dataset_path():
 def get_tests_output_path():
     """ """
     if "TESTS_OUTPUT_PATH" in os.environ:
-        return os.environ["TESTS_OUPTUT_PATH"]
+        return os.environ["TESTS_OUTPUT_PATH"]
     return "/work/scratch/data/" + os.environ["USER"] + "/tmp/"
 
 
