@@ -258,7 +258,8 @@ def get_strategy(args) -> ValidationParameters:
             custom_forecast_context_size=args.custom_forecast_context_size,
             custom_forecast_gap_step=args.custom_forecast_gap_step,
             custom_forecast_only_hr=args.custom_forecast_only_hr,
-            dt_orig=args.dt_orig
+            dt_orig=args.dt_orig,
+            custom_forecast_sliding_window=args.custom_forecast_sliding_window,
         )
     if algorithm in (Algorithm.SEN2LIKE, Algorithm.DSTFN):
         return ValidationParameters(strategy=ValidationStrategy.CONJLRuHR2HR)
@@ -478,125 +479,186 @@ def compute_predictions(
     raise ValueError(algorithm)
 
 
+def process_single_config(
+    test_config: TestingConfiguration,
+    pred_lr: MonoModalSITS | None,
+    pred_hr: MonoModalSITS | None,
+    name: str,
+    lr_bands: list[int],
+    hr_bands: list[int],
+    dataset,
+    args,
+    device: str,
+    config_idx: int = 0,
+) -> tuple[TimeSeriesTestResult | None, TimeSeriesTestResult | None]:
+    """
+    Process a single testing configuration: compute metrics, write images, generate animation.
+    Returns (lr_result, hr_result).
+    """
+    lr_result: TimeSeriesTestResult | None = None
+    hr_result: TimeSeriesTestResult | None = None
+
+    if not args.disable_metrics:
+        if args.invert_reference_masks:
+            test_config.lr_target = MonoModalSITS(
+                test_config.lr_target.data,
+                test_config.lr_target.doy,
+                ~test_config.lr_target.mask,
+            )
+            test_config.hr_target = MonoModalSITS(
+                test_config.hr_target.data,
+                test_config.hr_target.doy,
+                ~test_config.hr_target.mask,
+            )
+        with MeasureExecTime("Compute metrics", args.profile):
+            lr_result, hr_result = compute_metrics(
+                pred_lr,
+                pred_hr,
+                test_config,
+                get_tensor([LR_RES[i] for i in lr_bands], device=device),
+                get_tensor([LR_MTFS[i] for i in lr_bands], device=device),
+                get_tensor([HR_RES[i] for i in hr_bands], device=device),
+                get_tensor([HR_MTFS[i] for i in hr_bands], device=device),
+                name=name,
+                margin=args.margin,
+                profile=args.profile,
+            )
+
+    if args.write_images or args.generate_animations:
+        pred_lr = crop_sits(pred_lr, margin=int(args.margin)) if pred_lr else None
+        test_config.lr_input = (
+            crop_sits(test_config.lr_input, margin=int(args.margin / 3))
+            if test_config.lr_input
+            else None
+        )
+        test_config.lr_target = (
+            crop_sits(test_config.lr_target, margin=int(args.margin / 3))
+            if test_config.lr_target
+            else None
+        )
+        pred_hr = crop_sits(pred_hr, margin=int(args.margin)) if pred_hr else None
+        test_config.hr_input = (
+            crop_sits(test_config.hr_input, margin=int(args.margin))
+            if test_config.hr_input
+            else None
+        )
+        test_config.hr_target = (
+            crop_sits(test_config.hr_target, margin=int(args.margin))
+            if test_config.hr_target
+            else None
+        )
+
+    if args.write_images:
+        with MeasureExecTime("Writing outputs", args.profile):
+            lst_idx = [
+                i for i in range(len(lr_bands)) if LR_LABELS[lr_bands[i]] == "lst"
+            ]
+            write_predictions(
+                pred_lr,
+                pred_hr,
+                name,
+                str(dataset.dt_orig),
+                test_config,
+                lst_idx[0] if lst_idx else None,
+                args,
+            )
+
+    if args.generate_animations:
+        with MeasureExecTime("Generate Animation", args.profile):
+            lr_bands_labels = [LR_LABELS[i] for i in lr_bands]
+            hr_bands_labels = [HR_LABELS[i] for i in hr_bands]
+            lr_bands_for_rendering = [
+                lr_bands_labels.index(b) for b in ("b4", "b3", "b2")
+            ]
+            hr_bands_for_rendering = [
+                hr_bands_labels.index(b) for b in ("b4", "b3", "b2")
+            ]
+            out_path = Path(args.output) / "animations"
+            out_path.mkdir(parents=True, exist_ok=True)
+            # Use a unique filename per sliding window step to avoid overwriting
+            anim_suffix = f"_{config_idx:04d}" if config_idx > 0 else ""
+            generate_animation(
+                test_config.lr_input,
+                test_config.hr_input,
+                pred_lr,
+                pred_hr,
+                test_config.lr_target,
+                test_config.hr_target,
+                lr_bands_for_rendering,
+                hr_bands_for_rendering,
+                out_file=str(out_path / f"{name}{anim_suffix}.html"),
+            )
+
+    return lr_result, hr_result
+
+
 def process_time_series(
     ts: str, validation_parameters: ValidationParameters, args, device: str = "cpu"
 ) -> tuple[TimeSeriesTestResult | None, TimeSeriesTestResult | None]:
     """
-    This function processes a single time-series and output the metrics
+    This function processes a single time-series and output the metrics.
+    When using CUSTOM_FORECAST with sliding_window, iterates over all
+    generated configurations and aggregates the results.
     """
     name = os.path.basename(os.path.normpath(ts))
-    # First, build the dataset
-    # batch_size=10000 to ensure that we read all patches at once
     dataset, lr_bands, hr_bands = build_dataset(ts, args)
+
+    lr_results_local: list[TimeSeriesTestResult] = []
+    hr_results_local: list[TimeSeriesTestResult] = []
 
     with MeasureExecTime("Processing time-series", args.profile):
         batch = dataset[args.patch_idx]
+        print(f"{len(dataset)=}")
         if Algorithm(args.algorithm) is not Algorithm.DMS:
             batch = (batch[0].to(device=device), batch[1].to(device=device))
-        # Generate all possible testing configurations
+
         random.seed(args.seed)
-        test_config = next(
-            iter(generate_configurations(batch, parameters=validation_parameters))
-        )
-        # Apply normalization for testing
-        test_config.normalize_for_tests()
+        configs = list(generate_configurations(batch, parameters=validation_parameters))
 
-        with MeasureExecTime("Model inference", args.profile):
-            pred_lr, pred_hr = compute_predictions(
-                test_config, device=device, args=args
-            )
-        if not args.disable_metrics:
-            if args.invert_reference_masks:
-                test_config.lr_target = MonoModalSITS(
-                    test_config.lr_target.data,
-                    test_config.lr_target.doy,
-                    ~test_config.lr_target.mask,
-                )
-                test_config.hr_target = MonoModalSITS(
-                    test_config.hr_target.data,
-                    test_config.hr_target.doy,
-                    ~test_config.hr_target.mask,
-                )
-            with MeasureExecTime("Compute metrics", args.profile):
-                # Compute metrics
-                lr_result, hr_result = compute_metrics(
-                    pred_lr,
-                    pred_hr,
-                    test_config,
-                    get_tensor([LR_RES[i] for i in lr_bands], device=device),
-                    get_tensor([LR_MTFS[i] for i in lr_bands], device=device),
-                    get_tensor([HR_RES[i] for i in hr_bands], device=device),
-                    get_tensor([HR_MTFS[i] for i in hr_bands], device=device),
-                    name=name,
-                    margin=args.margin,
-                    profile=args.profile,
-                )
-        if args.write_images or args.generate_animations:
-            # Crop the sits for optional rendering
-            pred_lr = crop_sits(pred_lr, margin=int(args.margin)) if pred_lr else None
-            test_config.lr_input = (
-                crop_sits(test_config.lr_input, margin=int(args.margin / 3))
-                if test_config.lr_input
-                else None
-            )
-            test_config.lr_target = (
-                crop_sits(test_config.lr_target, margin=int(args.margin / 3))
-                if test_config.lr_target
-                else None
-            )
-            pred_hr = crop_sits(pred_hr, margin=int(args.margin)) if pred_hr else None
-            test_config.hr_input = (
-                crop_sits(test_config.hr_input, margin=int(args.margin))
-                if test_config.hr_input
-                else None
-            )
-            test_config.hr_target = (
-                crop_sits(test_config.hr_target, margin=int(args.margin))
-                if test_config.hr_target
-                else None
-            )
+        for config_idx, test_config in tqdm(
+                enumerate(configs), total=len(configs), desc="Inferences"
+            ):
+            test_config.normalize_for_tests()
 
-        if args.write_images:
-            with MeasureExecTime("Writing outputs", args.profile):
-                lst_idx = [
-                    i for i in range(len(lr_bands)) if LR_LABELS[lr_bands[i]] == "lst"
-                ]
-                write_predictions(
-                    pred_lr,
-                    pred_hr,
-                    name,
-                    str(dataset.dt_orig),
-                    test_config,
-                    lst_idx[0] if lst_idx else None,
-                    args,
+            with MeasureExecTime("Model inference", args.profile):
+                pred_lr, pred_hr = compute_predictions(
+                    test_config, device=device, args=args
                 )
 
-        if args.generate_animations:
-            with MeasureExecTime("Generate Animation", args.profile):
-                # Determine color composition
-                lr_bands_labels = [LR_LABELS[i] for i in lr_bands]
-                hr_bands_labels = [HR_LABELS[i] for i in hr_bands]
-                lr_bands_for_rendering = [
-                    lr_bands_labels.index(b) for b in ("b4", "b3", "b2")
-                ]
-                hr_bands_for_rendering = [
-                    hr_bands_labels.index(b) for b in ("b4", "b3", "b2")
-                ]
-                out_path = Path(args.output) / "animations"
-                out_path.mkdir(parents=True, exist_ok=True)
-                generate_animation(
-                    test_config.lr_input,
-                    test_config.hr_input,
-                    pred_lr,
-                    pred_hr,
-                    test_config.lr_target,
-                    test_config.hr_target,
-                    lr_bands_for_rendering,
-                    hr_bands_for_rendering,
-                    out_file=str(out_path / f"{name}.html"),
-                )
+            lr_result, hr_result = process_single_config(
+                test_config,
+                pred_lr,
+                pred_hr,
+                name,
+                lr_bands,
+                hr_bands,
+                dataset,
+                args,
+                device,
+                config_idx=config_idx,
+            )
+
+            if lr_result is not None:
+                lr_results_local.append(lr_result)
+            if hr_result is not None:
+                hr_results_local.append(hr_result)
+
     if not args.disable_metrics:
-        return lr_result, hr_result
+        # Aggregate: return the last result for single-config strategies,
+        # or the first non-None for multi-config (metrics are aggregated upstream).
+        # For sliding window, all individual results are collected; we return
+        # them concatenated via a synthetic TimeSeriesTestResult by yielding
+        # back all results individually through the callers list accumulation.
+        # Here we simply return the last computed result to maintain the
+        # existing single-return contract; the full list is handled below.
+        lr_result_out = lr_results_local[-1] if lr_results_local else None
+        hr_result_out = hr_results_local[-1] if hr_results_local else None
+        # For sliding_window, the caller accumulates individual results.
+        # We use a side-channel: store the full list on the function object
+        # so the caller (main) can harvest all results if needed.
+        process_time_series._last_lr_results = lr_results_local
+        process_time_series._last_hr_results = hr_results_local
+        return lr_result_out, hr_result_out
     return None, None
 
 
@@ -855,6 +917,10 @@ def main():
         "--custom_forecast_only_hr", action="store_true",
         help="If set, strictly use HR (Sentinel-2) images and ignore LR images"
     )
+    parser.add_argument(
+        "--custom_forecast_sliding_window", action="store_true",
+        help="Enable sliding window for sequential forecasting"
+    )
 
     args = parser.parse_args()
 
@@ -887,14 +953,18 @@ def main():
 
     for ts in tqdm(args.ts, total=len(args.ts), desc="Processing SITS ..."):
         try:
-            lr_result, hr_result = process_time_series(
+            process_time_series(
                 ts,
                 validation_parameters,
                 args,
                 dev,
             )
-            lr_results.append(lr_result)
-            hr_results.append(hr_result)
+            # Harvest all per-window results accumulated by process_time_series.
+            # Works for both single-config and sliding_window modes.
+            last_lr = getattr(process_time_series, "_last_lr_results", [])
+            last_hr = getattr(process_time_series, "_last_hr_results", [])
+            lr_results.extend(r for r in last_lr if r is not None)
+            hr_results.extend(r for r in last_hr if r is not None)
         except FileNotFoundError as e:
             logging.error(e)
         except ValueError as e:
