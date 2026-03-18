@@ -593,7 +593,7 @@ def tiled_inference(
                 hr_tiled_data,
                 total=hr_tiled_data.shape[0],
                 desc="Inference",
-                disable=None if show_progress else True,
+                disable=True,
             )
         ]
     elif lr_tiled_data is not None and hr_tiled_data is None:
