@@ -66,6 +66,7 @@ class SingleSITSDataset(torch.utils.data.Dataset):
         min_nb_dates: int = 4,
         max_nb_dates: int | None = None,
         conjunctions_only: bool = False,
+        coordinates_of_interest: tuple[float, float] | None = None,
     ):
         """
         Class initializer
@@ -188,15 +189,22 @@ class SingleSITSDataset(torch.utils.data.Dataset):
         with rio_open(first_hr_date_file, "r") as rio_ds:
             bounds = rio_ds.bounds
 
-        nb_patches_x = int(np.floor((bounds[2] - bounds[0]) / patch_size))
-        nb_patches_y = int(np.floor((bounds[3] - bounds[1]) / patch_size))
+        if coordinates_of_interest is not None:
+            min_x, min_y = coordinates_of_interest
 
-        pul_x, pul_y = np.meshgrid(
-            np.linspace(bounds[0], bounds[2], nb_patches_x, endpoint=False),
-            np.linspace(bounds[1], bounds[3], nb_patches_y, endpoint=False),
-        )
-        self.pul_x: np.ndarray = pul_x.ravel()
-        self.pul_y: np.ndarray = pul_y.ravel()
+            # On assigne directement le coin bas-gauche
+            self.pul_x = np.array([bounds.left + min_x])
+            self.pul_y = np.array([bounds.bottom + min_y])
+        else:
+            nb_patches_x = int(np.floor((bounds[2] - bounds[0]) / patch_size))
+            nb_patches_y = int(np.floor((bounds[3] - bounds[1]) / patch_size))
+
+            pul_x, pul_y = np.meshgrid(
+                np.linspace(bounds[0], bounds[2], nb_patches_x, endpoint=False),
+                np.linspace(bounds[1], bounds[3], nb_patches_y, endpoint=False),
+            )
+            self.pul_x: np.ndarray = pul_x.ravel()
+            self.pul_y: np.ndarray = pul_y.ravel()
 
         # Derive time range
         full_time_range = (
@@ -252,6 +260,7 @@ class SingleSITSDataset(torch.utils.data.Dataset):
         """
         Dataset length
         """
+        print(f"{self.pul_x=}, {self.time_slices=}")
         return len(self.pul_x) * len(self.time_slices)
 
     def load_state_dict(self, state_dict):
