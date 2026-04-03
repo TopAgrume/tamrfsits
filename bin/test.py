@@ -137,7 +137,11 @@ def build_dataset(ts: str, args) -> tuple[SingleSITSDataset, list[int], list[int
     if algorithm in (Algorithm.TAMRFSITS, Algorithm.NAIVE):
         return (
             SingleSITSDataset(
-                ts, lr_resolution=30.0, patch_size=args.width, dt_orig=args.dt_orig
+                ts,
+                lr_resolution=30.0,
+                patch_size=args.width,
+                dt_orig=args.dt_orig,
+                coordinates_of_interest=args.coordinates_of_interest
             ),
             list(range(8)),
             list(range(10)),
@@ -260,6 +264,7 @@ def get_strategy(args) -> ValidationParameters:
             custom_forecast_only_hr=args.custom_forecast_only_hr,
             dt_orig=args.dt_orig,
             custom_forecast_sliding_window=args.custom_forecast_sliding_window,
+            custom_forecast_horizon=args.custom_forecast_horizon,
         )
     if algorithm in (Algorithm.SEN2LIKE, Algorithm.DSTFN):
         return ValidationParameters(strategy=ValidationStrategy.CONJLRuHR2HR)
@@ -920,6 +925,17 @@ def main():
     parser.add_argument(
         "--custom_forecast_sliding_window", action="store_true",
         help="Enable sliding window for sequential forecasting"
+    )
+    parser.add_argument(
+        "--custom_forecast_horizon", type=int, default=0,
+        help="Gap between context window and target date (0 = target right after context, 5 = skip 5 dates)"
+    )
+    parser.add_argument(
+        "--coordinates_of_interest",
+        type=int,
+        nargs=2,
+        default=None,
+        help="X and Y coordinates of the lower left corner of the patch to be extracted."
     )
 
     args = parser.parse_args()
