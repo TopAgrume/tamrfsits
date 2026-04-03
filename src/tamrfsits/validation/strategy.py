@@ -106,6 +106,7 @@ class ValidationParameters:
     custom_forecast_only_hr: bool = True   # True pour n'utiliser que Sentinel-2 -> HR
     dt_orig: str = "2021-01-01"
     custom_forecast_sliding_window: bool = False  # prediction over all the time series
+    custom_forecast_horizon: int = 0
 
 @dataclass
 class TestingConfiguration:
@@ -600,10 +601,11 @@ def generate_configurations(
             ]
             # index 0 -> la date la plus proche du seuil
             past_hr_indices.reverse()
+            start_offset = parameters.custom_forecast_horizon
 
             selected_hr_indices = []
             # selection avec gaps temporels
-            for idx in range(0, len(past_hr_indices), parameters.custom_forecast_gap_step):
+            for idx in range(start_offset, len(past_hr_indices), parameters.custom_forecast_gap_step):
                 selected_hr_indices.append(past_hr_indices[idx])
                 if len(selected_hr_indices) == parameters.custom_forecast_context_size:
                     break
